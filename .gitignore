@@ -1,0 +1,34 @@
+# ---- 数据与标注（含患者检查号，禁止入库）----
+dataset/
+data/
+*.zip
+
+# ---- 训练 / 推理 / 评估产物 ----
+runs/
+analysis/
+*.log
+
+# ---- 模型权重（从零训练即可复现）----
+*.pt
+*.pth
+*.onnx
+*.engine
+*.torchscript
+
+# ---- 本地标注示例图（含真实超声帧）----
+assets/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ---- 编辑器 / 系统 ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
