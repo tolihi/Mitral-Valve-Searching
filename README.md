@@ -546,6 +546,78 @@ python realtime.py --weights best.pt --source rtsp://... --no-show ^
 接院内超声机 / 采集卡的实时流，等于把患者影像实时送进模型，属于数据处理行为，
 需要院内授权与合规评估。本脚本只实现技术链路，不包含脱敏、审计和访问控制。
 
+### 9.6 画面从哪来：支持的输入渠道
+
+`--source` 认这些写法，除特别注明外都在本机实测过：
+
+| 渠道 | `--source` 写法 | 典型来源 | 验证状态 |
+| --- | --- | --- | --- |
+| 本机摄像头 | `0` / `1` / `cam:0` | USB 摄像头、USB 采集卡（HDMI 输出接到电脑） | ✅ 实测（摄像头 0） |
+| RTSP | `rtsp://user:pass@ip:554/stream` | IP 摄像头、超声机/工作站网关、mediamtx 中转 | ✅ 实测（mediamtx 1.21.4 推流） |
+| HTTP MJPEG | `http://ip:port/stream.mjpg` | 多数网络摄像头、手机 IP 摄像头 App（如 `http://ip:8080/video`）、ffmpeg `mpjpeg` | ✅ 实测 |
+| UDP MPEG-TS | `udp://0.0.0.0:5000` | ffmpeg 直推、采集卡软件、组播局域网分发 | ✅ 实测 |
+| RTMP | `rtmp://ip:1935/live` | OBS 推流、直播软件 | ⚠️ 未单独验证（走同一个 FFmpeg 客户端） |
+| 本地视频回放 | `demo.avi --loop` | 没有硬件时演练/回归测试 | ✅ 实测 |
+
+**其他来源（屏幕、采集卡、图片序列、超声机 SDK）不需要改代码**——用 ffmpeg 把它们转成上面任一协议即可。
+所有 ffmpeg 命令里的 `-re` 表示"按实时速度推"，不加会以最快速度灌完。
+
+```bat
+:: A) 屏幕某块区域 -> RTSP（先开 mediamtx，见下）
+ffmpeg -f gdigrab -framerate 15 -offset_x 0 -offset_y 0 -video_size 1024x768 -i desktop ^
+    -c:v libx264 -preset ultrafast -tune zerolatency -f rtsp rtsp://127.0.0.1:8554/screen
+
+:: B) HDMI / USB 采集卡 -> RTSP（设备名用 ffmpeg -list_devices true -f dshow -i dummy 查）
+ffmpeg -f dshow -i video="USB Video" -c:v libx264 -preset ultrafast -tune zerolatency ^
+    -f rtsp rtsp://127.0.0.1:8554/capture
+
+:: C) 一堆图片按序播放成流
+ffmpeg -re -framerate 10 -i "frames\%06d.jpg" -c:v libx264 -preset ultrafast ^
+    -f rtsp rtsp://127.0.0.1:8554/live
+
+:: D) 本地视频模拟直播（UDP，不需要任何服务器）
+ffmpeg -re -stream_loop -1 -i demo.avi -c:v mpeg2video -f mpegts udp://127.0.0.1:5000
+python realtime.py --weights best.pt --source udp://127.0.0.1:5000 --show
+
+:: E) 本地视频模拟直播（HTTP MJPEG，同样不需要服务器）
+ffmpeg -re -stream_loop -1 -i demo.avi -c:v mjpeg -q:v 5 -f mpjpeg -listen 1 http://127.0.0.1:8099/stream.mjpg
+python realtime.py --weights best.pt --source http://127.0.0.1:8099/stream.mjpg --show
+```
+
+要一个**真正的 RTSP 服务器**做联调（A/B/C 三种配方都需要），用
+[mediamtx](https://github.com/bluenviron/mediamtx/releases)（单文件 exe，解压即用，默认监听 8554）：
+
+```bat
+mediamtx.exe
+:: 另开一个窗口推流，再另开一个跑推理
+ffmpeg -re -stream_loop -1 -i demo.avi -c:v libx264 -preset ultrafast -tune zerolatency -f rtsp rtsp://127.0.0.1:8554/live
+python realtime.py --weights best.pt --source rtsp://127.0.0.1:8554/live --show
+```
+
+**如果你的源是一个 Python 回调（超声机 SDK、DICOM 回放、pydicom、私有采集库），
+可以完全绕开脚本，直接调三行 API**：
+
+```python
+from inference import EchoSegmenter, InferenceConfig, analyze_frame
+from visualize import render_result
+import cv2
+
+seg = EchoSegmenter("weights/best.pt", imgsz=640)
+cfg = InferenceConfig(imgsz=640, guided=False)
+while True:
+    frame = read_my_source()                      # 你的源，返回 BGR ndarray
+    result = analyze_frame(seg, None, frame, cfg)  # None=不用关系模型；传 RelationPredictor 即可启用
+    cv2.imshow("echo", render_result(frame, result))
+    if cv2.waitKey(1) & 0xFF in (27, ord("q")):
+        break
+```
+
+打不开流时的排查顺序：`--backend ffmpeg` 强制指定后端 → 用 ffmpeg 命令行直接拉一下确认流本身活着 →
+RTSP 换 UDP 传输（`set OPENCV_FFMPEG_CAPTURE_OPTIONS=rtsp_transport;udp`，本脚本默认 TCP，穿透性更好）。
+
+延迟构成：模型单帧约 300 ms（见 §9.4），通路本身（RTSP/UDP 局域网）实测只占几十毫秒，
+所以**瓶颈在推理，不在网络**；要降延迟优先上 GPU，而不是换协议。
+
 ---
 
 ## 10. 换一台电脑跑：不用重新训练
