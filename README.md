@@ -118,6 +118,8 @@ python evaluate.py --weights runs\segment\echo_relation_seg\weights\best.pt --da
 
 > 要接**实时流或摄像头**（RTSP / HTTP / 本机摄像头），用 `realtime.py`，见第 9 节；
 > `predict.py` 只处理本地文件，给它流地址会被拒绝并提示。
+>
+> 只想拿现成权重做推理、或者换一台电脑跑，**不用重新训练**：见第 10 节。
 
 > **标注图长什么样**（`predict.py --side-by-side`：左半原图、右半标注，本仓库不附患者图像）：
 >
@@ -543,3 +545,89 @@ python realtime.py --weights best.pt --source rtsp://... --no-show ^
 
 接院内超声机 / 采集卡的实时流，等于把患者影像实时送进模型，属于数据处理行为，
 需要院内授权与合规评估。本脚本只实现技术链路，不包含脱敏、审计和访问控制。
+
+---
+
+## 10. 换一台电脑跑：不用重新训练
+
+**只要任务不变（还是二尖瓣 + 卵圆孔、还是同一类切面），换电脑不需要重训，直接推理即可。**
+训练出来的东西和电脑无关；换机器唯一要做的是把**权重**和**关系模型**带过去。
+
+### 10.1 必须带走的两个文件
+
+| 文件 | 大小 | 作用 | 仓库里有吗 |
+| --- | --- | --- | --- |
+| `best.pt` | 6.1 MB | YOLO11-seg 分割权重 | ❌ 不含（`.gitignore` 排除了 `*.pt`） |
+| `relation.json` | 18.6 KB | 相对位置模型（方向 / 距离 / 不确定度） | ❌ 不含（在 `dataset/` 里，数据集不入库） |
+
+`dataset/`、`runs/`、标注和原始图像**都不用带**——推理不需要它们。
+
+> 只有 `best.pt` 也能跑，只是退化成"只分割、不给方向"（`predict.py` 会打印
+> "关系模型: 未使用"）。想要方向预测就把 `relation.json` 一起带上。
+
+### 10.2 新电脑上的完整命令
+
+```bat
+:: 1) 拿代码（公开仓库，不需要账号）
+git clone https://github.com/tolihi/Mitral-Valve-Searching.git
+cd Mitral-Valve-Searching
+
+:: 2) 建环境（Python 3.10-3.12）
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install -U pip
+python -m pip install -r requirements.txt
+
+:: 3) 把 best.pt 和 relation.json 放到 weights\ 目录下（从原来的机器拷过来）
+::    目录结构： weights\best.pt   weights\relation.json
+
+:: 4) 验证环境（两条都应 exit 0）
+python predict.py --help
+python realtime.py --help
+
+:: 5) 推理：单张图 / 整个目录 / 视频
+python predict.py --weights weights\best.pt --source frame.jpg --out runs\predict
+python predict.py --weights weights\best.pt --source "D:\data\echo" --out runs\predict --side-by-side
+python predict.py --weights weights\best.pt --source case.avi --out runs\predict
+
+:: 6) 实时（摄像头 0 / RTSP 流）
+python realtime.py --weights weights\best.pt --source 0 --show
+python realtime.py --weights weights\best.pt --source rtsp://192.168.1.10:8554/echo --show
+```
+
+`--relation auto`（默认）会按 `dataset/relation.json` → `权重同级目录/relation.json` →
+上级目录 的顺序自动找，所以把两个文件放在同一个 `weights\` 里最省事，不用写 `--relation`。
+
+**有 GPU 的话**（可选，快很多）：把 torch 换成 CUDA 版再装 ultralytics——
+
+```bat
+python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+python -m pip install -r requirements.txt
+python predict.py --weights weights\best.pt --source frame.jpg --out runs\predict --device 0
+```
+
+### 10.3 什么时候才需要重训（或微调）
+
+| 情况 | 要不要重训 | 说明 |
+| --- | --- | --- |
+| 换一台电脑、同型号机器、同样切面 | **不用** | 直接推理 |
+| 换医院 / 换超声机 / 换探头，图像风格差异大 | **建议微调** | 先直接跑看指标，掉得明显再用新数据微调（不用从零训） |
+| 要加新结构（比如三尖瓣）或改类别定义 | **要重训** | 类别变了，权重结构就不对了 |
+| 想提高精度、补更多检查号 | **要（增量）训练** | 用 `train_seg.py` 在更大的数据集上重跑 |
+
+**诚实的提醒**：现有 `best.pt` 只用**一个检查号**的 153 帧训练，跨机器/跨操作者的泛化
+**没有验证过**（见 §8.4）。换机器直接跑，务必先在自己的数据上看一批结果再决定是否可用。
+
+### 10.4 在新电脑上评估（不训练也能做）
+
+只要手上有标注，就能直接用现成权重算指标——这正是判断"要不要微调"的方法：
+
+```bat
+:: 1) 用 CVAT 导出 + 原图重建数据集（会在本地生成 dataset\，含 data.yaml）
+python prepare_dataset.py --zip "cvat_export.zip" --images "D:\data\echo_new" --out dataset
+
+:: 2) 把权重和关系模型放进 dataset\ 同级或指定路径，然后评估
+python evaluate.py --weights weights\best.pt --data dataset --split val --relation weights\relation.json
+```
+
+指标明显低于 §8.2（mask mAP50 0.831）就说明分布不同，需要补数据微调。
