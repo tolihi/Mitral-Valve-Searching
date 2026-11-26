@@ -1,4 +1,4 @@
-"""train_relation.py —— 训练"二尖瓣 ↔ 卵圆孔"的相对位置模型（方向 + 距离 + 不确定度）。
+"""train_relation.py —— 训练"二尖瓣 <-> 卵圆孔"的相对位置模型（方向 + 距离 + 不确定度）。
 
 用法：
     python train_relation.py --data dataset

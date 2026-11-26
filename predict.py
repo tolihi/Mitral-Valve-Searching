@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -381,6 +382,17 @@ def run_single_image(
 # ---------------------------------------------------------------------------
 # 命令行
 # ---------------------------------------------------------------------------
+LIVE_PREFIXES = ("rtsp://", "rtsps://", "http://", "https://", "rtmp://", "udp://", "srt://")
+
+
+def _looks_live(text: str) -> bool:
+    """判断输入是不是流地址/摄像头序号——这类输入由 realtime.py 负责。"""
+    low = text.strip().lower()
+    if low.startswith(LIVE_PREFIXES):
+        return True
+    return bool(re.fullmatch(r"(?:cam|camera)\s*:\s*\d+|\d+", low))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="二尖瓣/卵圆孔分割 + 相对方向预测",
@@ -432,6 +444,15 @@ def main(argv: list[str] | None = None) -> int:
     if not weights.is_file():
         print(f"[error] 找不到权重：{weights}", file=sys.stderr)
         return 1
+    raw_source = str(args.source).strip()
+    if _looks_live(raw_source):
+        print(
+            "[error] predict.py 只处理本地文件（图像 / 目录 / 视频），不支持流地址或摄像头。\n"
+            f"        实时检测请用 realtime.py：\n"
+            f"        python realtime.py --weights \"{args.weights}\" --source \"{raw_source}\" --show",
+            file=sys.stderr,
+        )
+        return 2
     source = Path(args.source)
     if not source.exists():
         print(f"[error] 找不到输入：{source}", file=sys.stderr)

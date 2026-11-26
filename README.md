@@ -18,6 +18,7 @@ echo-relation-seg/
 ├── train_seg.py          YOLO11-seg 训练（分割模型）
 ├── train_relation.py     相对位置模型训练（LOO 交叉验证 + 不确定度校准）
 ├── predict.py            推理：图像 / 图像目录 / 视频
+├── realtime.py           实时检测：RTSP / HTTP 流、摄像头、视频回放（丢旧帧保延迟）
 ├── evaluate.py           评估：分割 mAP + 关系链 + 引导找回
 ├── common.py             几何、绘制、读写等公共函数
 ├── relation.py           相对位置模型（经验先验 / 岭回归 / MDN）
@@ -114,6 +115,9 @@ python evaluate.py --weights runs\segment\echo_relation_seg\weights\best.pt --da
 
 `predict.py` 会自动在 `dataset/relation.json`、权重同级/上级目录里找关系模型；
 找不到就退化为"只分割"，不会报错。用 `--no-relation` 可强制关闭，`--no-guided` 关闭引导找回。
+
+> 要接**实时流或摄像头**（RTSP / HTTP / 本机摄像头），用 `realtime.py`，见第 9 节；
+> `predict.py` 只处理本地文件，给它流地址会被拒绝并提示。
 
 > **标注图长什么样**（`predict.py --side-by-side`：左半原图、右半标注，本仓库不附患者图像）：
 >
@@ -426,7 +430,9 @@ python train_seg.py --data dataset --model yolo11n-seg.pt --epochs 60 ^
 | box mAP50-95 | 0.452 | 0.534 | 0.370 |
 
 - `best.pt` 出自 epoch 49（该轮 mask mAP50 0.834），最后一轮 0.798，属于正常抖动。
-- 单帧推理 146 ms（CPU / 768）。
+- **速度口径要说清**：验证模式（ultralytics 批处理，batch 16 左右）平均 **146 ms/图**；
+  但实时场景是 batch=1、逐帧跑，同一台 CPU 实测 **约 320 ms/帧 @640、415 ms/帧 @768**
+  （≈ 2.4–3 fps），批处理带来的 2 倍差距不要混着引用。见 §9。
 - 检测召回：二尖瓣 **95.0%**（19/20），卵圆孔 **90.9%**（10/11）；精确率 95.0% / 100%。
 - 视频通路也用这套权重跑过：22 帧 AVI → 标注 mp4 + 逐帧 JSON，`exit=0`。
 
@@ -456,3 +462,84 @@ python train_seg.py --data dataset --model yolo11n-seg.pt --epochs 60 ^
 - 上临床前至少补 3–5 个检查号（不同机器/不同操作者），并按检查号分组重跑评估。
 - `mitral→fossa` 的角度没有优于常数基线（7.81° vs 8.01°）：这个方向的朝向本来就几乎恒定，
   学习模型主要在**距离/落点**上赢（85 px → 50 px）。别把"角度"当成它学到的能力。
+
+---
+
+## 9. 实时检测（RTSP / 摄像头 / 视频回放）
+
+`realtime.py` 是给"在线数据"用的入口。`predict.py` 只吃本地文件（图像 / 目录 / 视频），
+把流地址丢给它会被拒绝——它会提示你改用 `realtime.py`。
+
+### 9.1 和 `predict.py` 的关键区别
+
+| | `predict.py`（离线） | `realtime.py`（在线） |
+| --- | --- | --- |
+| 输入 | 本地文件、目录 | RTSP / HTTP / RTMP 流、摄像头、视频回放 |
+| 取帧方式 | 逐帧顺序读，**每帧都处理** | 后台线程持续取帧，**只处理最新一帧** |
+| 落后时 | 变慢，但一帧不丢 | **丢旧帧**，延迟不累积 |
+| 输出 | 标注图 / 视频 / 汇总 JSON | 预览窗口 / 录制 mp4 / JSONL / 汇总 JSON |
+| 断流 | 直接结束 | `--reconnect N` 自动重连 |
+
+一句话：要"把这段视频逐帧分析完整"用 `predict.py`；要"看着实时画面做判断"用 `realtime.py`。
+拿本地视频喂 `realtime.py` 时它也会丢帧（这是在线语义，不是 bug）。
+
+### 9.2 跑起来
+
+```bat
+:: 网络流 + 预览窗口（按 q 或 ESC 退出）
+python realtime.py --weights best.pt --source rtsp://192.168.1.10:8554/echo --show
+
+:: 本机摄像头 0，同时录一段
+python realtime.py --weights best.pt --source 0 --show --record runs\realtime\cam.mp4
+
+:: 没有流也没有摄像头：用本地视频模拟直播（循环播放）
+python realtime.py --weights best.pt --source demo.avi --loop --show --no-guided
+
+:: 无人值守：不预览，只录制 + 逐帧 JSONL + 汇总
+python realtime.py --weights best.pt --source rtsp://... --no-show ^
+    --record runs\realtime\stream.mp4 --jsonl runs\realtime\frames.jsonl --idle-timeout 30
+```
+
+`--source` 的写法：`rtsp://` / `rtsps://` / `http(s)://` / `rtmp://` / `udp://` 开头即流；
+`0`、`1`、`cam:0`、`camera:1` 是本机摄像头序号；其余按本地视频文件解析。
+
+### 9.3 常用参数
+
+| 参数 | 说明 |
+| --- | --- |
+| `--show` / `--no-show` | 预览窗口；无显示器环境用 `--no-show` |
+| `--record <mp4>` | 录制标注结果；`--record-every N` 每 N 帧写 1 帧省磁盘 |
+| `--jsonl <file>` | 逐帧结果（体积大，默认不写） |
+| `--imgsz` | 默认 **640**（实时优先，比 `predict.py` 的 1024 小） |
+| `--no-guided` | 关闭引导式二次检测，**默认就是关的**，打开会更慢 |
+| `--no-relation` | 连关系模型都不加载，只做分割（最快） |
+| `--frame-stride N` | 每 N 帧处理 1 帧 |
+| `--reconnect N` / `--reconnect-delay S` | 断流自动重连 |
+| `--idle-timeout S` | 超过 S 秒没新帧就退出（无人值守必备） |
+| `--backend ffmpeg\|dshow\|msmf` | 打不开摄像头/流时指定解码后端 |
+
+### 9.4 实测速度：CPU 上做不到流畅实时
+
+在本机（i5-13500H，无 GPU）用 `best.pt` 实测：
+
+| 场景 | 单帧耗时 | 等效帧率 |
+| --- | --- | --- |
+| imgsz 640 + 关系模型 | ~320 ms | **~3 fps** |
+| imgsz 768 | ~415 ms | ~2.4 fps |
+| imgsz 512 + `--no-relation` | ~160 ms | ~6 fps |
+| 摄像头 0（imgsz 512） | p50 258 ms | ~4 fps |
+| 绘制标注（不含推理） | ~4 ms | 可忽略 |
+
+结论：
+
+- **CPU 上这是"近实时"**：能看到带方向预测的画面，但大约 3 fps，不是流畅视频。
+- 要真正 30 fps，需要 GPU（`--device 0`）。**本项目没在 GPU 上测过吞吐，不给未经验证的数字。**
+- 注意和 §8.2 的 146 ms 区分：那是验证模式批处理（batch ≈ 16）的均值，
+  实时是 batch=1，慢一倍属于正常。
+- 掉帧是设计行为：源端 25 fps、模型 3 fps 时，你会得到 3 fps 的预览，但**延迟稳定在几百毫秒**，
+  不会像"顺序队列"那样越跑越滞后。结尾汇总会打印丢帧率，别忽略它。
+
+### 9.5 合规提醒
+
+接院内超声机 / 采集卡的实时流，等于把患者影像实时送进模型，属于数据处理行为，
+需要院内授权与合规评估。本脚本只实现技术链路，不包含脱敏、审计和访问控制。
